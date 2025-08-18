@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "VariFlight-Aviation": {
+      "url": "http://localhost:8000/",
+      "description": "通过代理服务器连接的飞常准航空数据服务"
+    }
+  }
+}
