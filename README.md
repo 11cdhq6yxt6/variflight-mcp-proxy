@@ -74,9 +74,9 @@ username|password|sk-xxxxxxxxxxxxxxxxxxxxxxxxx
 python main.py
 ```
 
-#### 方式2: 使用启动器（推荐）
+#### 方式2: 使用启动器（可选）
 ```bash
-python start.py --port 8080 --log-level debug
+python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
 #### 方式3: 使用Docker（推荐）
@@ -263,6 +263,83 @@ GET http://localhost:8000/ip/geo?lat={latitude}&lng={longitude}
 ```
 
 ### 代理请求
+
+#### 飞常准MCP代理
+所有根路径请求都会被透明地代理到飞常准MCP服务器：
+```
+GET|POST /{path:path}
+```
+代理会自动处理token轮询、流式传输等。
+
+#### IP查询MCP代理
+IP查询也提供MCP代理服务，支持JSON-RPC 2.0格式：
+```
+POST /ip/{path:path}
+```
+
+**支持的JSON-RPC方法**：
+
+1. **获取本机IP**
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "get_my_ip",
+  "params": {},
+  "id": 1
+}
+```
+
+2. **查询单个IP**
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "lookup_ip",
+  "params": {
+    "ip": "8.8.8.8"
+  },
+  "id": 2
+}
+```
+
+3. **批量查询IP**
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "batch_lookup",
+  "params": {
+    "ips": ["8.8.8.8", "1.1.1.1"]
+  },
+  "id": 3
+}
+```
+
+4. **地理编码查询**
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "geo_lookup",
+  "params": {
+    "latitude": 37.4220,
+    "longitude": -122.0841
+  },
+  "id": 4
+}
+```
+
+**响应格式**：
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "ip": "8.8.8.8",
+    "country": "美国",
+    "city": "Mountain View",
+    "isp": "Google LLC"
+  }
+}
+```
+
 所有其他路径的请求都会被透明地代理到飞常准MCP服务器。
 
 ## 🔧 MCP客户端配置
@@ -277,8 +354,8 @@ GET http://localhost:8000/ip/geo?lat={latitude}&lng={longitude}
             "description": "通过代理服务器连接的飞常准航空数据服务"
         },
         "IPLookup": {
-            "url": "http://localhost:8000/",
-            "description": "IP地址查询工具"
+            "url": "http://localhost:8000/ip",
+            "description": "IP地址查询工具 - 支持JSON-RPC 2.0"
         }
     }
 }

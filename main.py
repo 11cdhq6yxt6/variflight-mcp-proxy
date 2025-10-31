@@ -352,6 +352,61 @@ async def health_check():
     )
 
 
+# ==================== IP查询代理路由 ====================
+
+@app.api_route("/ip/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
+async def ip_proxy_request(request: Request, path: str):
+    """IP查询工具代理路由，统一处理IP相关请求"""
+    registry = get_tool_registry()
+    tool = registry.get_tool("IPLookup")
+
+    if not tool:
+        raise HTTPException(status_code=503, detail="IPLookup工具未注册")
+
+    try:
+        # 获取请求体
+        body = await request.body() if request.method in ["POST", "PUT", "PATCH"] else None
+
+        if body:
+            try:
+                request_data = json.loads(body.decode('utf-8'))
+                method = request_data.get('method')
+                params = request_data.get('params', {})
+
+                # 根据method调用对应的IP查询功能
+                if method == 'get_my_ip':
+                    result = await tool.handle_request("get_my_ip", {})
+                elif method == 'lookup_ip':
+                    result = await tool.handle_request("lookup", params)
+                elif method == 'batch_lookup':
+                    result = await tool.handle_request("batch_lookup", params)
+                elif method == 'geo_lookup':
+                    result = await tool.handle_request("geo_lookup", params)
+                else:
+                    raise HTTPException(status_code=400, detail=f"未知的方法: {method}")
+
+                # 返回标准MCP响应格式
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_data.get('id'),
+                    "result": result
+                }
+                return JSONResponse(
+                    content=response,
+                    headers={"Content-Type": "application/json"}
+                )
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="无效的JSON请求体")
+        else:
+            raise HTTPException(status_code=400, detail="请求体不能为空")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"IP查询代理失败: {e}")
+        raise HTTPException(status_code=500, detail=f"IP查询失败: {str(e)}")
+
+
 # ==================== 代理路由 ====================
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
