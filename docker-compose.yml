@@ -1,0 +1,17 @@
+services:
+  proxy:
+    build: .
+    container_name: variflight-mcp-proxy
+    ports:
+      - 4102:8000
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Persist blacklist under ./data on host
+      - BLACKLIST_FILE=/data/blacklist.pkl
+    volumes:
+      # Provide tokens at runtime; never bake into image
+      - ./accounts.txt:/app/accounts.txt:ro
+      # Persist runtime data (blacklist)
+      - ./data:/data
+    restart: unless-stopped
+networks: {}

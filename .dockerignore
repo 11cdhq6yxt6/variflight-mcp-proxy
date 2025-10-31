@@ -1,0 +1,47 @@
+# 虚拟环境
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# 日志文件
+*.log
+*.log.*
+*.pkl
+
+# Git 和版本控制
+.git
+.gitignore
+.gitattributes
+
+# IDE 和编辑器
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# 临时文件
+.DS_Store
+Thumbs.db
+
+# 测试文件
+test_core.py
+.pytest_cache
+
+# 文档文件（可选，如果需要减小镜像体积）
+*.md
+
+# CI/CD 配置文件
+.github
+.gitlab-ci.yml
+.travis.yml
+
+# 环境变量文件
+.env
+.env.local
+
+# 其他开发工具
+.shrimp
+.claude

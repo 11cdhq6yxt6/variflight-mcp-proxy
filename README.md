@@ -69,16 +69,43 @@ username|password|sk-xxxxxxxxxxxxxxxxxxxxxxxxx
 
 ### 3. 启动服务
 
+#### 方式1: 直接运行
 ```bash
 python main.py
 ```
 
-或使用启动器获得更多配置选项：
+#### 方式2: 使用启动器（推荐）
 ```bash
 python start.py --port 8080 --log-level debug
 ```
 
-服务将在 `http://localhost:8000` 启动
+#### 方式3: 使用Docker（推荐）
+```bash
+# 构建镜像
+docker build -t variflight-mcp-proxy:latest .
+
+# 运行容器
+docker run -d \
+  --name variflight-proxy \
+  -p 4102:8000 \
+  -v $(pwd)/accounts.txt:/app/accounts.txt:ro \
+  -v $(pwd)/data:/data \
+  variflight-mcp-proxy:latest
+```
+
+或使用docker-compose（推荐）：
+```bash
+# 启动服务
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f
+
+# 停止服务
+docker-compose down
+```
+
+服务将在 `http://localhost:4102` 启动（Docker方式）
 
 ### 4. 使用代理
 
