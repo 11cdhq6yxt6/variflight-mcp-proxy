@@ -17,3 +17,5 @@ blacklist.pkl
 *.log.*.*.*.*
 *.log.*.*.*.*.*
 *.log.*.*.*.*.*.*
+/.claude
+/.shrmip

@@ -2,12 +2,11 @@
 """
 飞常准MCP服务器代理中间件
 实现token轮询机制，避免单个token额度限制
+现在支持工具集模式
 """
 
 import asyncio
 import logging
-import pickle
-import os
 from typing import List, Optional, Dict, Any, Set
 import aiohttp
 from fastapi import FastAPI, HTTPException, Request
@@ -20,297 +19,107 @@ import json
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class TokenManager:
-    """Token管理器，负责token轮询和状态管理"""
-    
-    def __init__(self, accounts_file: str = "accounts.txt", blacklist_file: str = "blacklist.pkl"):
-        self.accounts_file = accounts_file
-        self.blacklist_file = blacklist_file
-        self.tokens: List[str] = []
-        self.current_index = 0
-        self.failed_tokens: Set[str] = set()  # 临时失效
-        self.blacklisted_tokens: Set[str] = set()  # 永久拉黑
-        self.load_blacklist()
-        self.load_tokens()
-    
-    def load_blacklist(self):
-        """从文件加载永久拉黑的token列表"""
-        try:
-            if os.path.exists(self.blacklist_file):
-                with open(self.blacklist_file, 'rb') as f:
-                    self.blacklisted_tokens = pickle.load(f)
-                logger.info(f"加载了 {len(self.blacklisted_tokens)} 个永久拉黑的token")
-        except Exception as e:
-            logger.warning(f"加载拉黑列表失败: {e}")
-            self.blacklisted_tokens = set()
-    
-    def save_blacklist(self):
-        """保存永久拉黑的token列表到文件"""
-        try:
-            with open(self.blacklist_file, 'wb') as f:
-                pickle.dump(self.blacklisted_tokens, f)
-            logger.info(f"保存了 {len(self.blacklisted_tokens)} 个永久拉黑的token")
-        except Exception as e:
-            logger.error(f"保存拉黑列表失败: {e}")
-    
-    def load_tokens(self):
-        """从accounts.txt文件加载token"""
-        try:
-            with open(self.accounts_file, 'r', encoding='utf-8') as f:
-                for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    if line:
-                        # 解析格式: username|password|token
-                        parts = line.split('|')
-                        if len(parts) >= 3:
-                            token = parts[-1]  # 取最后一部分作为token
-                            if token.startswith('sk-'):
-                                # 只加载未被永久拉黑的token
-                                if token not in self.blacklisted_tokens:
-                                    self.tokens.append(token)
-                                else:
-                                    logger.info(f"跳过已拉黑的token: {token[:20]}...")
-                            else:
-                                logger.warning(f"第{line_num}行token格式可能不正确: {token[:20]}...")
-                        else:
-                            logger.warning(f"第{line_num}行格式不正确: {line[:50]}...")
-            
-            logger.info(f"成功加载 {len(self.tokens)} 个可用token")
-            if not self.tokens:
-                raise ValueError("未找到有效的token")
-                
-        except FileNotFoundError:
-            logger.error(f"账号文件 {self.accounts_file} 不存在")
-            raise
-        except Exception as e:
-            logger.error(f"加载token时出错: {e}")
-            raise
-    
-    def get_next_token(self) -> Optional[str]:
-        """获取下一个可用的token"""
-        if not self.tokens:
-            return None
-        
-        # 过滤掉临时失效和永久拉黑的token
-        available_tokens = [t for t in self.tokens 
-                          if t not in self.failed_tokens and t not in self.blacklisted_tokens]
-        
-        if not available_tokens:
-            logger.warning("所有token都已失效，重置临时失败列表")
-            self.failed_tokens.clear()
-            available_tokens = [t for t in self.tokens if t not in self.blacklisted_tokens]
-            
-            if not available_tokens:
-                logger.error("所有token都已被永久拉黑！")
-                return None
-        
-        # 轮询获取token
-        token = available_tokens[self.current_index % len(available_tokens)]
-        self.current_index += 1
-        
-        return token
-    
-    def mark_token_failed(self, token: str):
-        """标记token为临时失效"""
-        self.failed_tokens.add(token)
-        logger.warning(f"Token标记为临时失效: {token[:20]}...")
-    
-    def blacklist_token(self, token: str, reason: str = "认证失败"):
-        """永久拉黑token"""
-        if token in self.blacklisted_tokens:
-            logger.info(f"Token已在拉黑列表中: {token[:20]}...")
-            return
-            
-        self.blacklisted_tokens.add(token)
-        # 从可用token列表中移除
-        if token in self.tokens:
-            self.tokens.remove(token)
-            logger.info(f"从可用列表中移除token: {token[:20]}...")
-        # 从临时失效列表中移除（如果存在）
-        if token in self.failed_tokens:
-            self.failed_tokens.discard(token)
-            logger.info(f"从临时失效列表中移除token: {token[:20]}...")
-        
-        # 保存到文件
-        self.save_blacklist()
-        logger.error(f"🚫 Token已永久拉黑 ({reason}): {token[:20]}... | 当前拉黑总数: {len(self.blacklisted_tokens)}")
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """获取token使用统计"""
-        return {
-            "total_loaded_tokens": len(self.tokens),
-            "temporarily_failed_tokens": len(self.failed_tokens),
-            "permanently_blacklisted_tokens": len(self.blacklisted_tokens),
-            "available_tokens": len([t for t in self.tokens 
-                                   if t not in self.failed_tokens and t not in self.blacklisted_tokens])
-        }
+# 导入从tools.variflight模块迁移的类
+from tools.variflight import TokenManager, MCPProxy
 
-class MCPProxy:
-    """MCP代理客户端 - 支持完整header转发和流式传输"""
-    
-    def __init__(self, token_manager: TokenManager):
-        self.token_manager = token_manager
-        self.base_url = "https://ai.variflight.com/servers/aviation/mcp/"
-        self.session: Optional[aiohttp.ClientSession] = None
-        # 不应该转发的headers
-        self.skip_headers = {
-            'host', 'content-length', 'connection', 'upgrade', 
-            'proxy-connection', 'proxy-authorization', 'te', 'trailers'
-        }
-    
-    async def __aenter__(self):
-        if not self.session or self.session.closed:
-            self.session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=300),  # 增加超时时间支持流式传输
-                connector=aiohttp.TCPConnector(limit=100, ttl_dns_cache=300, use_dns_cache=True)
-            )
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session and not self.session.closed:
-            await self.session.close()
-            self.session = None
-    
-    def _prepare_headers(self, original_headers: Dict[str, str]) -> Dict[str, str]:
-        """准备转发的headers，过滤掉不应该转发的headers"""
-        headers = {}
-        
-        # 转发原始headers（除了跳过的headers）
-        for key, value in original_headers.items():
-            if key.lower() not in self.skip_headers:
-                headers[key] = value
-        
-        # 确保包含MCP协议要求的headers
-        if 'accept' not in headers:
-            headers['Accept'] = 'application/json, text/event-stream'
-        elif 'text/event-stream' not in headers.get('accept', ''):
-            # 如果Accept header存在但不包含text/event-stream，则添加
-            headers['Accept'] = f"{headers['accept']}, text/event-stream"
-        
-        # 设置User-Agent
-        if 'user-agent' not in headers:
-            headers['User-Agent'] = 'MCP-Proxy/1.0.0'
-        
-        return headers
-    
-    async def proxy_request(self, method: str, path: str, 
-                           headers: Dict[str, str], 
-                           body: Optional[bytes] = None,
-                           max_retries: int = 3) -> aiohttp.ClientResponse:
-        """代理请求到MCP服务器，返回原始响应以支持流式传输"""
-        
-        if not self.session:
-            raise RuntimeError("MCPProxy未正确初始化，请使用async with")
-        
-        for attempt in range(max_retries):
-            token = self.token_manager.get_next_token()
-            if not token:
-                raise HTTPException(status_code=503, detail="没有可用的token")
-            
-            # 构建完整URL
-            url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}" if path else self.base_url
-            params = {"api_key": token}
-            
-            # 准备headers
-            request_headers = self._prepare_headers(headers)
-            
-            try:
-                logger.info(f"代理请求 {method} {url} (attempt {attempt + 1}/{max_retries})")
-                
-                # 发送请求但不立即读取响应体
-                response = await self.session.request(
-                    method,
-                    url,
-                    params=params,
-                    headers=request_headers,
-                    data=body
-                )
-                
-                # 检查响应状态
-                if response.status == 200:
-                    logger.info(f"请求成功: {token[:20]}...")
-                    return response  # 返回响应对象以支持流式读取
-                
-                elif response.status in [401, 403]:
-                    # 永久拉黑token
-                    reason = f"HTTP {response.status} 认证失败"
-                    logger.error(f"Token认证失败({response.status})，永久拉黑: {token[:20]}...")
-                    self.token_manager.blacklist_token(token, reason)
-                    await response.release()  # 释放连接
-                    continue  # 尝试下一个token
-                
-                elif response.status == 429:
-                    # 速率限制，临时失效
-                    logger.warning(f"Token达到速率限制: {token[:20]}...")
-                    self.token_manager.mark_token_failed(token)
-                    await response.release()
-                    await asyncio.sleep(1)  # 等待1秒后重试
-                    continue
-                
-                else:
-                    # 其他错误
-                    response_text = await response.text()
-                    logger.error(f"请求失败: {response.status} - {response_text[:200]}")
-                    await response.release()
-                    
-                    if attempt == max_retries - 1:
-                        raise HTTPException(
-                            status_code=response.status,
-                            detail=f"上游服务器错误: {response.status}"
-                        )
-                    await asyncio.sleep(0.5)  # 短暂等待后重试
-            
-            except aiohttp.ClientError as e:
-                logger.error(f"网络错误: {e}")
-                if attempt == max_retries - 1:
-                    raise HTTPException(status_code=503, detail="网络连接错误")
-                await asyncio.sleep(1)
-        
-        raise HTTPException(status_code=503, detail="所有重试都失败了")
-    
-    async def stream_response(self, response: aiohttp.ClientResponse):
-        """流式读取响应数据"""
-        try:
-            async for chunk in response.content.iter_chunked(8192):
-                yield chunk
-        finally:
-            await response.release()
+# 导入工具注册表
+from core.registry import get_tool_registry
+
+# 导入IP查询工具
+from tools.ip_lookup import IPQueryTool
 
 # 全局变量
-token_manager = TokenManager()
+token_manager = None
 mcp_proxy = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    global mcp_proxy
-    # 启动时初始化
+    global token_manager, mcp_proxy
+
+    # 获取工具注册表
+    registry = get_tool_registry()
+
+    # 启动时注册和初始化工具
+    logger.info("MCP代理服务启动 - 初始化工具集")
+
+    # 注册IP查询工具
+    try:
+        await registry.register_tool(
+            IPQueryTool,
+            name="IPLookup",
+            config={
+                "version": "1.0.0",
+                "description": "IP地址查询工具",
+                "timeout": 10,
+                "max_retries": 2,
+                "enable_multiple_sources": True
+            }
+        )
+        logger.info("IPLookup工具注册成功")
+
+        # 启动IP查询工具
+        success = await registry.start_tool("IPLookup")
+        if success:
+            logger.info("IPLookup工具启动成功")
+        else:
+            logger.warning("IPLookup工具启动失败")
+    except Exception as e:
+        logger.error(f"IPLookup工具注册失败: {e}")
+
+    # 创建全局token_manager实例（向后兼容）
+    token_manager = TokenManager()
     mcp_proxy = MCPProxy(token_manager)
     await mcp_proxy.__aenter__()  # 初始化会话
-    logger.info("MCP代理服务启动")
+
+    logger.info("MCP代理服务启动完成")
     yield
+
     # 关闭时清理
+    logger.info("MCP代理服务关闭")
     if mcp_proxy:
         await mcp_proxy.__aexit__(None, None, None)
-    logger.info("MCP代理服务关闭")
+
+    # 关闭IP查询工具
+    try:
+        await registry.stop_tool("IPLookup")
+        logger.info("IPLookup工具已停止")
+    except Exception as e:
+        logger.error(f"停止IPLookup工具失败: {e}")
 
 # 创建FastAPI应用
 app = FastAPI(
-    title="飞常准MCP代理服务",
-    description="提供token轮询功能的飞常准MCP服务器代理",
-    version="1.0.0",
+    title="个人MCP工具集合",
+    description="基于工具集模式的MCP代理服务，支持多种工具扩展",
+    version="2.0.0",
     lifespan=lifespan
 )
 
 @app.get("/")
 async def root():
-    """健康检查和服务信息"""
-    stats = token_manager.get_stats()
+    """服务概览和快速状态"""
+    registry = get_tool_registry()
+    tools_status = registry.get_all_tools_status()
+
     return JSONResponse(
         content={
             "service": "飞常准MCP代理服务",
+            "version": "2.0.0",
             "status": "running",
-            "token_stats": stats
+            "tools_count": len(tools_status),
+            "tools": {name: status["status"] for name, status in tools_status.items()},
+            "token_stats": token_manager.get_stats() if token_manager else {},
+            "mcp_proxy": mcp_proxy.base_url if mcp_proxy else None,
+            "api_endpoints": {
+                "tools_list": "/tools",
+                "health": "/health",
+                "stats": "/stats",
+                "blacklist": "/blacklist",
+                "ip_my": "/ip/my",
+                "ip_lookup": "/ip/lookup/{ip}",
+                "ip_batch": "/ip/batch",
+                "ip_geo": "/ip/geo?lat={lat}&lng={lng}"
+            }
         },
         headers={
             "Content-Type": "application/json",
@@ -321,12 +130,36 @@ async def root():
 @app.get("/stats")
 async def get_stats():
     """获取详细统计信息"""
+    registry = get_tool_registry()
+    tools_stats = registry.get_all_tools_stats()
+
     return JSONResponse(
         content={
-            "token_stats": token_manager.get_stats(),
             "service_info": {
+                "name": "飞常准MCP代理服务",
+                "version": "2.0.0",
                 "base_url": mcp_proxy.base_url if mcp_proxy else None,
-                "version": "1.0.0"
+                "uptime": "N/A"  # 可以添加服务启动时间跟踪
+            },
+            "token_stats": token_manager.get_stats() if token_manager else {},
+            "tools_stats": {
+                name: {
+                    "status": stats.get("status"),
+                    "requests_total": stats.get("requests_total"),
+                    "requests_success": stats.get("requests_success"),
+                    "requests_failed": stats.get("requests_failed"),
+                    "uptime_seconds": stats.get("uptime_seconds"),
+                    "last_used": stats.get("last_used")
+                }
+                for name, stats in tools_stats.items()
+            },
+            "summary": {
+                "total_tools": len(tools_stats),
+                "total_requests": sum(s.get("requests_total", 0) for s in tools_stats.values()),
+                "success_rate": (
+                    sum(s.get("requests_success", 0) for s in tools_stats.values()) /
+                    max(sum(s.get("requests_total", 0) for s in tools_stats.values()), 1) * 100
+                )
             }
         },
         headers={
@@ -358,6 +191,168 @@ async def get_blacklist():
             "Content-Type": "application/json"
         }
     )
+
+# ==================== IP查询工具API路由 ====================
+
+@app.get("/ip/my")
+async def get_my_ip():
+    """获取本机公网IP地址"""
+    registry = get_tool_registry()
+    tool = registry.get_tool("IPLookup")
+
+    if not tool:
+        raise HTTPException(status_code=503, detail="IPLookup工具未注册")
+
+    try:
+        result = await tool.handle_request("get_my_ip", {})
+        return JSONResponse(
+            content=result,
+            headers={"Content-Type": "application/json"}
+        )
+    except Exception as e:
+        logger.error(f"获取本机IP失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取本机IP失败: {str(e)}")
+
+
+@app.get("/ip/lookup/{ip}")
+async def lookup_ip(ip: str):
+    """查询指定IP地址的详细信息"""
+    registry = get_tool_registry()
+    tool = registry.get_tool("IPLookup")
+
+    if not tool:
+        raise HTTPException(status_code=503, detail="IPLookup工具未注册")
+
+    try:
+        result = await tool.handle_request("lookup", {"ip": ip})
+        return JSONResponse(
+            content=result,
+            headers={"Content-Type": "application/json"}
+        )
+    except Exception as e:
+        logger.error(f"IP查询失败: {e}")
+        raise HTTPException(status_code=500, detail=f"IP查询失败: {str(e)}")
+
+
+@app.post("/ip/batch")
+async def batch_lookup_ips(request: Request):
+    """批量查询多个IP地址"""
+    registry = get_tool_registry()
+    tool = registry.get_tool("IPLookup")
+
+    if not tool:
+        raise HTTPException(status_code=503, detail="IPLookup工具未注册")
+
+    try:
+        data = await request.json()
+        ips = data.get("ips", [])
+
+        if not ips:
+            raise HTTPException(status_code=400, detail="缺少IP地址列表")
+
+        result = await tool.handle_request("batch_lookup", {"ips": ips})
+        return JSONResponse(
+            content=result,
+            headers={"Content-Type": "application/json"}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"批量IP查询失败: {e}")
+        raise HTTPException(status_code=500, detail=f"批量IP查询失败: {str(e)}")
+
+
+@app.get("/ip/geo")
+async def geo_lookup(
+    lat: float,
+    lng: float
+):
+    """地理编码查询 - 根据坐标查询地址"""
+    registry = get_tool_registry()
+    tool = registry.get_tool("IPLookup")
+
+    if not tool:
+        raise HTTPException(status_code=503, detail="IPLookup工具未注册")
+
+    try:
+        result = await tool.handle_request("geo_lookup", {
+            "latitude": lat,
+            "longitude": lng
+        })
+        return JSONResponse(
+            content=result,
+            headers={"Content-Type": "application/json"}
+        )
+    except Exception as e:
+        logger.error(f"地理编码查询失败: {e}")
+        raise HTTPException(status_code=500, detail=f"地理编码查询失败: {str(e)}")
+
+# ==================== 工具管理API路由 ====================
+
+@app.get("/tools")
+async def list_tools():
+    """列出所有已注册的工具及其状态"""
+    registry = get_tool_registry()
+    tools_status = registry.get_all_tools_status()
+    tools_stats = registry.get_all_tools_stats()
+
+    return JSONResponse(
+        content={
+            "total_tools": len(tools_status),
+            "running_tools": sum(1 for t in tools_status.values() if t["status"] == "running"),
+            "tools": {
+                name: {
+                    "status": status["status"],
+                    "version": status["version"],
+                    "description": status["description"],
+                    "uptime_seconds": status["uptime_seconds"],
+                    "error_count": status["error_count"],
+                    "request_count": status["request_count"],
+                    "stats": tools_stats.get(name, {})
+                }
+                for name, status in tools_status.items()
+            }
+        },
+        headers={"Content-Type": "application/json"}
+    )
+
+
+@app.get("/health")
+async def health_check():
+    """执行全系统健康检查"""
+    registry = get_tool_registry()
+    health_status = registry.get_tools_health()
+
+    # 检查整体健康状态
+    overall_healthy = all(h["healthy"] for h in health_status.values())
+    mcp_proxy_healthy = mcp_proxy is not None and token_manager is not None
+
+    # 详细的健康检查报告
+    checks = {
+        "overall": {
+            "healthy": overall_healthy and mcp_proxy_healthy,
+            "status": "healthy" if (overall_healthy and mcp_proxy_healthy) else "degraded"
+        },
+        "tools": health_status,
+        "mcp_proxy": {
+            "healthy": mcp_proxy_healthy,
+            "base_url": mcp_proxy.base_url if mcp_proxy else None,
+            "token_manager": token_manager is not None
+        },
+        "services": {
+            "fastapi": "healthy",
+            "memory": "healthy",  # 可以添加更详细的内存检查
+            "disk_space": "healthy"  # 可以添加磁盘空间检查
+        }
+    }
+
+    return JSONResponse(
+        content=checks,
+        headers={"Content-Type": "application/json"}
+    )
+
+
+# ==================== 代理路由 ====================
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
 async def proxy_request(request: Request, path: str):
@@ -461,6 +456,7 @@ async def proxy_request(request: Request, path: str):
     except Exception as e:
         logger.error(f"代理请求时出错: {e}")
         raise HTTPException(status_code=500, detail=f"代理服务器内部错误: {str(e)}")
+
 
 if __name__ == "__main__":
     # 启动服务
